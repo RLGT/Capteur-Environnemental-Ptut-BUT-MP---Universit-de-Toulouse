@@ -1,0 +1,142 @@
+/*****************************************************
+ * BIBLIOTHEQUES A INSTALLER POUR ARDUINO NANO 33 IoT
+ * Arduino SAMD Boards (32-bits ARM Cortex-M0+)
+
+ * RTClib by Adafruit
+ * Adafruit BME280 Library
+ * Adafruit Unified Sensor
+ * AS726X (SparkFun Spectral Sensor)
+ * LORA by Sandeep Mistry
+ *****************************************************/
+
+#include <Wire.h>            // Communication I2C
+#include <SPI.h>             // Communication SPI (SD + LoRa)
+#include <SD.h>              // Gestion de la carte SD
+#include <RTClib.h>          // Gestion de la RTC DS1307
+#include <AS726X.h>          // Capteur de spectre AS726X
+#include <Adafruit_BME280.h> // Capteur BME280 Temp/Hum/Press
+#include <LoRa.h>            // Communication LoRa SX1276
+
+// ---------------- CAPTEURS ----------------
+AS726X sensor;            // Instance pour le capteur de spectre
+Adafruit_BME280 bme;      // Instance pour BME280
+
+// ---------------- RTC ----------------
+RTC_DS1307 rtc;           // Instance pour la RTC DS1307
+
+// ---------------- SD ----------------
+const int chipSelect = 4; // Pin CS pour la carte SD
+
+// ---------------- LoRa ----------------
+#define LORA_CS   10      // Chip Select LoRa
+#define LORA_RST  8       // Reset LoRa
+#define LORA_DIO0 9       // DIO0 (Interrupt LoRa)
+
+// ---------------- Buffers date/heure ----------------
+char dateBuffer[11];      // YYYY-MM-DD
+char timeBuffer[9];       // HH:MM:SS
+
+void setup() {
+  Serial.begin(115200);    // Initialisation du moniteur série
+  while (!Serial);         // Attente que le port série soit prêt
+
+  Wire.begin();            // Initialisation I2C
+
+  // ---------------- INIT AS726X ----------------
+  if (!sensor.begin()) {
+    Serial.println(" Erreur AS726X !");
+    while (1);             // Bloque si échec
+  }
+
+  // ---------------- INIT BME280 ----------------
+  if (!bme.begin(0x76)) { // Adresse 0x76 ou 0x77 selon module
+    Serial.println(" Erreur BME280 !");
+    while (1);
+  }
+
+  // ---------------- INIT RTC ----------------
+  if (!rtc.begin()) {
+    Serial.println(" RTC non detectee !");
+    while (1);
+  }
+  if (!rtc.isrunning()) {
+    Serial.println("ℹ️ RTC n'était pas en marche, réglage à la compilation");
+    rtc.adjust(DateTime(F(__DATE__), F(__TIME__))); // Réglage automatique
+  }
+
+  // ---------------- INIT SD ----------------
+  if (!SD.begin(chipSelect)) {
+    Serial.println(" Erreur initialisation SD !");
+    while (1);
+  }
+  // Crée le fichier CSV si nécessaire
+  if (!SD.exists("MesuresReflect.csv")) {
+    File dataFile = SD.open("MesuresReflect.csv", FILE_WRITE);
+    if (dataFile) {
+      dataFile.println("Date;Heure;R;S;T;U;V;W;TempAS726;TempBME;HumBME;PressBME");
+      dataFile.close();
+    }
+  }
+
+  // ---------------- INIT LoRa ----------------
+  LoRa.setPins(LORA_CS, LORA_RST, LORA_DIO0);    // Définition des pins
+  if (!LoRa.begin(868E6)) {                     // Fréquence 868MHz
+    Serial.println(" Erreur LoRa !");
+    while (1);
+  }
+  Serial.println("✅ Setup terminé, capteurs et LoRa OK !");
+}
+
+void loop() {
+  // ---------------- Date/Heure ----------------
+  DateTime now = rtc.now();
+  sprintf(dateBuffer, "%04d-%02d-%02d", now.year(), now.month(), now.day());
+  sprintf(timeBuffer, "%02d:%02d:%02d", now.hour(), now.minute(), now.second());
+
+  // ---------------- Lecture AS726X ----------------
+  sensor.takeMeasurements();           // Lance une lecture
+  float R = sensor.getCalibratedR();  // Canaux NIR
+  float S = sensor.getCalibratedS();
+  float T = sensor.getCalibratedT();
+  float U = sensor.getCalibratedU();
+  float V = sensor.getCalibratedV();
+  float W = sensor.getCalibratedW();
+  float tempAS = sensor.getTemperature(); // Température interne du capteur
+
+  // ---------------- Lecture BME280 ----------------
+  float tempBME = bme.readTemperature();   // °C
+  float humBME  = bme.readHumidity();      // %
+  float pressBME= bme.readPressure() / 100.0; // hPa
+
+  // ---------------- Stockage SD ----------------
+  File dataFile = SD.open("MesuresReflect.csv", FILE_WRITE);
+  if (dataFile) {
+    dataFile.print(dateBuffer); dataFile.print(';');
+    dataFile.print(timeBuffer); dataFile.print(';');
+    dataFile.print(R,2); dataFile.print(';');
+    dataFile.print(S,2); dataFile.print(';');
+    dataFile.print(T,2); dataFile.print(';');
+    dataFile.print(U,2); dataFile.print(';');
+    dataFile.print(V,2); dataFile.print(';');
+    dataFile.print(W,2); dataFile.print(';');
+    dataFile.print(tempAS,1); dataFile.print(';');
+    dataFile.print(tempBME,1); dataFile.print(';');
+    dataFile.print(humBME,1); dataFile.print(';');
+    dataFile.println(pressBME,1);
+    dataFile.close();
+  }
+
+  // ---------------- Transmission LoRa ----------------
+  LoRa.beginPacket();
+  LoRa.print(dateBuffer); LoRa.print(" ");
+  LoRa.print(timeBuffer); LoRa.print(" ");
+  LoRa.print(R,2); LoRa.print(","); LoRa.print(S,2); LoRa.print(","); 
+  LoRa.print(T,2); LoRa.print(","); LoRa.print(U,2); LoRa.print(","); 
+  LoRa.print(V,2); LoRa.print(","); LoRa.print(W,2); LoRa.print(" ");
+  LoRa.print(tempAS,1); LoRa.print(","); LoRa.print(tempBME,1); LoRa.print(",");
+  LoRa.print(humBME,1); LoRa.print(","); LoRa.print(pressBME,1);
+  LoRa.endPacket();
+
+  delay(1000); // 1 lecture/seconde, ajustable
+}
+
